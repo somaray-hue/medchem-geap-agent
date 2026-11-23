@@ -35,13 +35,13 @@ variable "image_tag" {
 variable "model_fast" {
   description = "Strategic FAST-tier Gemini model ID."
   type        = string
-  default     = "gemini-2.5-flash"
+  default     = "gemini-3.5-flash"
 }
 
 variable "model_reasoning" {
   description = "Strategic REASONING-tier Gemini model ID."
   type        = string
-  default     = "gemini-2.5-pro"
+  default     = "gemini-3.1-pro-preview"
 }
 
 variable "txgemma_endpoint_id" {

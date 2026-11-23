@@ -178,7 +178,7 @@ def build_self_critic_agent(router: ModelRouter | None = None) -> LlmAgent:
 
 
 def build_quick_chemistry_lookup_agent(router: ModelRouter | None = None) -> LlmAgent:
-    """Build a FAST-tier specialist for single-turn compound, ADMET, or descriptor lookups."""
+    """Build a FAST-tier specialist for single-turn compound, ADMET, or HITL ELN/CRO actions."""
     mr = router or ModelRouter()
     route = mr.route(TaskComplexity.EXTRACTION)
     quick_skills = _build_skill_toolset(["pubchem-database", "rdkit-mmpa-qsar"])
@@ -187,12 +187,18 @@ def build_quick_chemistry_lookup_agent(router: ModelRouter | None = None) -> Llm
         model=route.model_id,
         description=(
             "Handles fast, focused single-compound queries (PubChem lookup, RDKit descriptors, "
-            "CNS-MPO/PAINS check, TxGemma ADMET triage, or internal ELN TPP retrieval) without "
-            "triggering the full multi-stage lead-optimization pipeline."
+            "CNS-MPO/PAINS check, TxGemma ADMET triage, internal ELN TPP retrieval) as well as "
+            "standalone HITL-gated Enterprise ELN SDF exports and external CRO assay orders "
+            "without triggering the full multi-stage lead-optimization pipeline."
         ),
         instruction=(
             f"{CURATOR_INSTRUCTION}\n\n"
             "Handle concise single-step chemistry queries rapidly using deterministic tools only. "
+            "For standalone Enterprise ELN export requests, ALWAYS validate the candidate SMILES "
+            "with `validate_and_score_candidate_macrocycle_design` and then invoke "
+            "`export_validated_synthesis_candidates_to_eln` (never substitute "
+            "`commit_design_decision_to_campaign_memory` for an ELN SDF export). "
+            "For external CRO assay orders, invoke `submit_external_cro_assay_order`. "
             "Always include exact canonical SMILES, tool-computed values, and the research-use-only note."
         ),
         tools=[
@@ -203,6 +209,7 @@ def build_quick_chemistry_lookup_agent(router: ModelRouter | None = None) -> Llm
             predict_txgemma_admet_and_toxicity_profile,
             validate_and_score_candidate_macrocycle_design,
             export_validated_synthesis_candidates_tool,
+            submit_external_cro_assay_tool,
             commit_design_decision_to_campaign_memory,
         ],
     )

@@ -46,11 +46,11 @@ class AppSettings(BaseModel):
 
     # Strategic model routing tiers
     model_fast: str = Field(
-        default="gemini-2.5-flash",
+        default="gemini-3.5-flash",
         description="Low-latency model tier for extraction, database curation, and compaction.",
     )
     model_reasoning: str = Field(
-        default="gemini-2.5-pro",
+        default="gemini-3.1-pro-preview",
         description="High-reasoning model tier for scientific planning, SAR synthesis, and critique.",
     )
     txgemma_endpoint_id: str | None = Field(
@@ -148,8 +148,8 @@ def get_settings() -> AppSettings:
         gcp_location=os.getenv("GCP_LOCATION", "us-central1"),
         agent_engine_id=os.getenv("AGENT_ENGINE_ID") or None,
         use_vertex_ai=_as_bool(os.getenv("GOOGLE_GENAI_USE_VERTEXAI"), default=False),
-        model_fast=os.getenv("MODEL_FAST", "gemini-2.5-flash"),
-        model_reasoning=os.getenv("MODEL_REASONING", "gemini-2.5-pro"),
+        model_fast=os.getenv("MODEL_FAST", "gemini-3.5-flash"),
+        model_reasoning=os.getenv("MODEL_REASONING", "gemini-3.1-pro-preview"),
         txgemma_endpoint_id=os.getenv("TXGEMMA_ENDPOINT_ID") or None,
         session_db_url=os.getenv(
             "SESSION_DB_URL",

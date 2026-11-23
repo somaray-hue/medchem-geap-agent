@@ -1,9 +1,9 @@
 """Strategic Model Routing across Gemini Flash, Gemini Pro, and DeepMind TxGemma.
 
 Routes each specialist agent and subtask to the optimal cost/latency/reasoning tier:
-- FAST (`gemini-2.5-flash`): Database curation, literature parsing, target lookups,
+- FAST (`gemini-3.5-flash`): Database curation, literature parsing, target lookups,
   event history compaction, and ADMET triage orchestration.
-- REASONING (`gemini-2.5-pro`): Root campaign planning, SAR/MMPA hypothesis synthesis,
+- REASONING (`gemini-3.1-pro-preview`): Root campaign planning, SAR/MMPA hypothesis synthesis,
   macrocycle design reasoning, and scientific self-evaluation critique.
 - SPECIALIST_THERAPEUTICS (`txgemma` Model Garden endpoint): Specialized molecular
   ADMET, BBB permeability, CYP inhibition, and toxicity scoring.

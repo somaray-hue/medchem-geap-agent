@@ -17,11 +17,13 @@ from medchem_agent.agent import create_medchem_app
 from medchem_agent.config.model_router import ModelRouter, ModelTier, TaskComplexity
 from medchem_agent.config.settings import AppSettings
 from medchem_agent.plugins.guardrails_plugin import ChemGuardrailsAndPolicyPlugin
+from medchem_agent.prompts.constitution import COORDINATOR_INSTRUCTION
 from medchem_agent.schemas.chemistry import SelfCritiqueReport
 from medchem_agent.tools.export_hitl import (
     export_validated_synthesis_candidates_to_eln,
     export_validated_synthesis_candidates_tool,
     requires_high_stakes_cro_confirmation,
+    submit_external_cro_assay_tool,
 )
 
 LORLATINIB_SMILES = "C[C@H]1Oc2cc(cnc2N)-c2c(nn(C)c2C#N)CN(C)C(=O)c2ccc(F)cc21"
@@ -29,18 +31,22 @@ LORLATINIB_SMILES = "C[C@H]1Oc2cc(cnc2N)-c2c(nn(C)c2C#N)CN(C)C(=O)c2ccc(F)cc21"
 
 def test_multi_agent_architecture_and_strategic_model_routing() -> None:
     """Verify Coordinator -> Sequential -> Parallel topology and strategic Flash/Pro routing."""
-    app = create_medchem_app()
+    default_settings = AppSettings()
+    app = create_medchem_app(default_settings)
     coordinator = app.root_agent
     assert isinstance(coordinator, LlmAgent)
     assert coordinator.name == "medchem_coordinator_agent"
-    assert coordinator.model == "gemini-2.5-pro"
+    assert coordinator.model == "gemini-3.1-pro-preview"
 
     sub_by_name = {a.name: a for a in coordinator.sub_agents}
     assert "quick_chemistry_lookup_agent" in sub_by_name
     assert "lead_optimization_pipeline" in sub_by_name
 
-    # Fast lookup agent uses Flash tier
-    assert sub_by_name["quick_chemistry_lookup_agent"].model == "gemini-2.5-flash"
+    # Fast lookup agent uses Flash tier and mounts both standalone HITL tools
+    quick_agent = sub_by_name["quick_chemistry_lookup_agent"]
+    assert quick_agent.model == "gemini-3.5-flash"
+    assert export_validated_synthesis_candidates_tool in quick_agent.tools
+    assert submit_external_cro_assay_tool in quick_agent.tools
 
     pipeline = sub_by_name["lead_optimization_pipeline"]
     assert isinstance(pipeline, SequentialAgent)
@@ -49,21 +55,31 @@ def test_multi_agent_architecture_and_strategic_model_routing() -> None:
     parallel = pipeline.sub_agents[0]
     assert isinstance(parallel, ParallelAgent)
     assert len(parallel.sub_agents) == 2
-    assert all(a.model == "gemini-2.5-flash" for a in parallel.sub_agents)
+    assert all(a.model == "gemini-3.5-flash" for a in parallel.sub_agents)
 
     critic = pipeline.sub_agents[-1]
     assert critic.name == "scientific_self_critic_agent"
-    assert critic.model == "gemini-2.5-pro"
+    assert critic.model == "gemini-3.1-pro-preview"
     assert critic.output_schema is SelfCritiqueReport
 
     # Verify dynamic escalation in ModelRouter
-    router = ModelRouter()
+    router = ModelRouter(default_settings)
     fast_route = router.route(TaskComplexity.EXTRACTION)
     assert fast_route.tier == ModelTier.FAST
+    assert fast_route.model_id == "gemini-3.5-flash"
     escalated = router.route(TaskComplexity.EXTRACTION, require_high_precision=True)
     assert escalated.tier == ModelTier.REASONING
+    assert escalated.model_id == "gemini-3.1-pro-preview"
     tx_route = router.route(TaskComplexity.ADMET_PREDICTION)
     assert tx_route.tier == ModelTier.SPECIALIST_THERAPEUTICS
+
+
+def test_coordinator_instruction_enforces_hitl_eln_export_routing() -> None:
+    """Ensure Coordinator always delegates ELN SDF exports & CRO orders to HITL-gated tools."""
+    assert "export_validated_synthesis_candidates_to_eln" in COORDINATOR_INSTRUCTION
+    assert "submit_external_cro_assay_order" in COORDINATOR_INSTRUCTION
+    assert "quick_chemistry_lookup_agent" in COORDINATOR_INSTRUCTION
+    assert "NEVER** substitute `commit_design_decision_to_campaign_memory`" in COORDINATOR_INSTRUCTION
 
 
 @pytest.mark.asyncio

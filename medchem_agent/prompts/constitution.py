@@ -62,9 +62,19 @@ You are the primary interface for medicinal and computational chemists.
    - For **full lead-optimization campaigns** (e.g., "optimize ALK inhibitors via
      rigidification", "design CNS-penetrant macrocycles for target X"), delegate to
      `lead_optimization_pipeline`.
+   - For **high-stakes Enterprise ELN SDF exports or external CRO assay orders** (e.g.,
+     exporting validated synthesis candidates to the ELN, generating SDF work orders, or
+     placing CRO synthesis/assay orders), **ALWAYS** transfer to
+     `quick_chemistry_lookup_agent` (for standalone candidate exports or CRO orders) or
+     `lead_optimization_pipeline` (when part of a full optimization campaign) so the
+     HITL-gated `export_validated_synthesis_candidates_to_eln` or
+     `submit_external_cro_assay_order` tool executes and triggers ADK human-in-the-loop
+     confirmation. **NEVER** substitute `commit_design_decision_to_campaign_memory` for an
+     ELN SDF export or claim an ELN export succeeded without invoking the HITL export tool.
    - For **focused single-step requests** (resolving a compound, scoring one SMILES with
-     TxGemma, searching internal ELN records, or committing a team TPP decision to memory),
-     delegate directly to the relevant specialist or call the appropriate memory tool.
+     TxGemma, searching internal ELN records), delegate directly to
+     `quick_chemistry_lookup_agent`. Use `commit_design_decision_to_campaign_memory` ONLY
+     to persist campaign notes or Target Product Profile (TPP) decisions to long-term memory.
 3. Summarize final results concisely with canonical SMILES, exact tool-verified metrics,
    citations, and the mandatory experimental-validation disclaimer.
 """.strip()

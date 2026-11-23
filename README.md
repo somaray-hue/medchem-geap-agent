@@ -27,16 +27,16 @@ Chemist (Target + TPP / Campaign Query)
    ▼  [ChemGuardrailsAndPolicyPlugin: CBRN/Injection + Model Armor + IP Egress Fence]
    ▼  [ChemObservabilityPlugin: Intent-vs-Outcome JSON Logs + OpenTelemetry Spans + Async Memory]
 ┌─────────────────────────────────────────────────────────────────────────────────┐
-│  medchem_coordinator_agent (ADK LlmAgent — REASONING: gemini-2.5-pro)           │
+│  medchem_coordinator_agent (ADK LlmAgent — REASONING: gemini-3.1-pro-preview)   │
 │  • PreloadMemoryTool (GEAP Memory Bank / FTS SQLite)                            │
 │  • commit_design_decision_to_campaign_memory (non-blocking asyncio background)  │
 └──────────────┬───────────────────────────────────────────┬──────────────────────┘
                │                                           │
-               ▼ (Single-step lookups)                     ▼ (End-to-end campaigns)
+               ▼ (Single-step lookups & HITL exports)      ▼ (End-to-end campaigns)
 ┌──────────────────────────────────┐       ┌──────────────────────────────────────────────────┐
 │ quick_chemistry_lookup_agent     │       │ lead_optimization_pipeline (SequentialAgent)     │
-│ (FAST: gemini-2.5-flash)         │       │  1. parallel_intelligence_gatherer (Parallel)    │
-│ • PubChem / RDKit / TxGemma / ELN│       │     ├─ compound_and_literature_curator (Flash)   │
+│ (FAST: gemini-3.5-flash)         │       │  1. parallel_intelligence_gatherer (Parallel)    │
+│ • PubChem/RDKit/TxGemma/ELN/HITL │       │     ├─ compound_and_literature_curator (Flash)   │
 └──────────────────────────────────┘       │     └─ target_and_structure_context (Flash)      │
                                            │  2. sar_mmpa_modeling_agent (Pro + RDKit skill)  │
                                            │  3. admet_safety_triage_agent (Flash + TxGemma)  │
@@ -60,7 +60,7 @@ Chemist (Target + TPP / Campaign Query)
 | | Persistent Session State | `VertexAiSessionService` / `DatabaseSessionService` (async SQLite/Cloud SQL), `VertexAiMemoryBankService` / `SqliteMemoryService` (FTS5) in `medchem_agent/memory/persistence.py`, plus SQLite + cosine-similarity `EnterpriseElnStore` in `medchem_agent/memory/enterprise_store.py` |
 | | Async Memory Operations | Non-blocking `AsyncMemoryConsolidationManager` (`asyncio.create_task` + semaphore) in `medchem_agent/memory/async_consolidator.py`, dispatched from `ChemObservabilityPlugin.after_run_callback` and `commit_design_decision_to_campaign_memory` |
 | **3. Orchestration & Logic** | Multi-Agent Patterns | Coordinator (`LlmAgent`) + `SequentialAgent` + `ParallelAgent` + 7 specialized agents + ADK `SkillToolset` in `medchem_agent/agents/pipeline.py` and `medchem_agent/agents/specialists.py` |
-| | Strategic Model Routing | `ModelRouter` (`FAST`: `gemini-2.5-flash`, `REASONING`: `gemini-2.5-pro`, `SPECIALIST_THERAPEUTICS`: DeepMind TxGemma) with dynamic escalation in `medchem_agent/config/model_router.py` |
+| | Strategic Model Routing | `ModelRouter` (`FAST`: `gemini-3.5-flash`, `REASONING`: `gemini-3.1-pro-preview`, `SPECIALIST_THERAPEUTICS`: DeepMind TxGemma) with dynamic escalation in `medchem_agent/config/model_router.py` |
 | | Guardrails & Policy Plugins | `ChemGuardrailsAndPolicyPlugin` (`BasePlugin`) enforcing biosecurity/CBRN screening, Google Cloud Model Armor hook, Proprietary SMILES IP egress fence, and research-disclaimer self-eval in `medchem_agent/plugins/guardrails_plugin.py` |
 | | Human-in-the-Loop Hooks | `ResumabilityConfig(is_resumable=True)` + ADK `FunctionTool(..., require_confirmation=...)` + `tool_context.request_confirmation()` in `medchem_agent/tools/export_hitl.py` (static gate on ELN SDF export; dynamic cost/batch/toxicity gate on CRO orders) |
 | **4. Observability & Tracing** | Structured JSON Logging | `structlog` JSON renderer with Cloud Logging `severity` and trace/span correlation in `medchem_agent/observability/logging.py` (zero raw `print()` in agent runtime) |
