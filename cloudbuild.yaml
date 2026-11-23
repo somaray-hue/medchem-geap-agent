@@ -1,0 +1,52 @@
+# Google Cloud Build CI/CD pipeline for MedChem GEAP Enterprise Agent
+# Runs unit tests + deterministic golden evals before building and deploying to GEAP Agent Runtime.
+substitutions:
+  _REGION: us-central1
+  _REPOSITORY: medchem-geap-agents
+  _IMAGE_NAME: medchem-geap-agent
+
+steps:
+  - id: unit-tests-and-golden-eval
+    name: python:3.12-slim
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        apt-get update && apt-get install -y --no-install-recommends libxrender1 libxext6 libexpat1
+        pip install --no-cache-dir -e ".[dev]"
+        pytest -v tests/
+        python eval/run_eval.py
+
+  - id: build-container
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_IMAGE_NAME}:${SHORT_SHA}
+      - -t
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_IMAGE_NAME}:latest
+      - .
+
+  - id: push-container
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - --all-tags
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_IMAGE_NAME}
+
+  - id: terraform-plan
+    name: hashicorp/terraform:1.9
+    dir: terraform
+    entrypoint: sh
+    args:
+      - -c
+      - |
+        terraform init -backend=false
+        terraform validate
+
+images:
+  - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_IMAGE_NAME}:${SHORT_SHA}
+  - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_IMAGE_NAME}:latest
+
+options:
+  logging: CLOUD_LOGGING_ONLY

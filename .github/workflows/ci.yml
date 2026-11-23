@@ -1,0 +1,70 @@
+name: MedChem GEAP Agent CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint-test-eval:
+    name: Lint, Unit Tests & Golden Agent Eval
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv and dependencies
+        run: |
+          pip install uv
+          uv venv .venv --python 3.12
+          uv pip install --python .venv/bin/python -e ".[dev]"
+
+      - name: Lint with Ruff
+        run: .venv/bin/ruff check medchem_agent tests eval
+
+      - name: Run full pytest suite
+        run: .venv/bin/pytest -v tests/
+
+      - name: Run deterministic golden chemistry & safety evaluation suite
+        run: .venv/bin/python eval/run_eval.py
+
+  terraform-validate:
+    name: Validate Terraform IaC
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.0"
+
+      - name: Terraform Format Check
+        run: terraform -chdir=terraform fmt -check -recursive
+
+      - name: Terraform Init (no backend)
+        run: terraform -chdir=terraform init -backend=false
+
+      - name: Terraform Validate
+        run: terraform -chdir=terraform validate
+
+  docker-build-check:
+    name: Verify Production Container Build
+    runs-on: ubuntu-latest
+    needs: [lint-test-eval]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t medchem-geap-agent:ci .
