@@ -132,6 +132,20 @@ async def test_guardrails_plugin_blocks_cbrn_and_proprietary_smiles_egress() -> 
     assert smiles_block is not None
     assert smiles_block["error_code"] == "PROPRIETARY_SMILES_EGRESS_BLOCKED"
 
+    # Non-canonical atom-reordered equivalent SMILES must ALSO be blocked via RDKit canonicalization
+    from rdkit import Chem
+
+    lorl_mol = Chem.MolFromSmiles(LORLATINIB_SMILES)
+    assert lorl_mol is not None
+    non_canonical_lorl = Chem.MolToSmiles(lorl_mol, canonical=False, doRandom=True)
+    non_canon_block = await plugin.before_tool_callback(
+        tool=ext_tool,
+        tool_args={"query": non_canonical_lorl, "query_type": "smiles"},
+        tool_context=tool_ctx,
+    )
+    assert non_canon_block is not None
+    assert non_canon_block["error_code"] == "PROPRIETARY_SMILES_EGRESS_BLOCKED"
+
     # 4. Self-eval after_model_callback appends mandatory research-use-only disclaimer
     raw_resp = LlmResponse(
         content=types.Content(
@@ -162,13 +176,26 @@ class _FakeToolContext:
 def test_hitl_confirmation_lifecycle_and_dynamic_cro_threshold(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Verify HITL tool pauses for confirmation, handles rejection, and exports SDF upon approval."""
+    """Verify HITL tool fails closed without context, pauses for confirmation, handles rejection, and exports SDF upon approval."""
     assert export_validated_synthesis_candidates_tool._require_confirmation is True
 
     monkeypatch.setattr(
         "medchem_agent.tools.export_hitl.get_settings",
         lambda: AppSettings(export_dir=tmp_path / "exports"),
     )
+
+    # Step 0: Direct call with tool_context=None fails closed and writes zero artifacts
+    res_no_ctx = export_validated_synthesis_candidates_to_eln(
+        campaign_id="ALK-TEST-01",
+        target_symbol="ALK",
+        candidate_smiles_list=[LORLATINIB_SMILES],
+        estimated_synthesis_cost_usd=8500.0,
+        rationale="Rigidified macrocycle validated via MMPA and TxGemma ADMET.",
+        tool_context=None,
+    )
+    assert res_no_ctx["status"] == "pending_confirmation"
+    assert res_no_ctx["sdf_artifact_path"] is None
+    assert not (tmp_path / "exports").exists()
 
     # Step 1: First call with no confirmation pauses & calls request_confirmation()
     ctx_pending = _FakeToolContext(confirmation=None)

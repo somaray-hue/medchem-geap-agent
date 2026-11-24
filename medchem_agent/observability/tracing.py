@@ -22,6 +22,7 @@ from opentelemetry.sdk.trace.export import (
 from medchem_agent.config.settings import AppSettings, get_settings
 
 _configured_provider: TracerProvider | None = None
+_attached_exporters: set[str] = set()
 
 
 def configure_tracing(
@@ -59,36 +60,44 @@ def configure_tracing(
         provider = TracerProvider(resource=resource)
         trace.set_tracer_provider(provider)
         _configured_provider = provider
+        _attached_exporters.clear()
 
     if custom_exporter is not None:
         provider.add_span_processor(SimpleSpanProcessor(custom_exporter))
     else:
         if cfg.enable_cloud_trace and cfg.gcp_project_id:
-            try:
-                from opentelemetry.exporter.cloud_trace import CloudTraceSpanExporter
+            cloud_key = f"cloud_trace:{cfg.gcp_project_id}"
+            if cloud_key not in _attached_exporters:
+                try:
+                    from opentelemetry.exporter.cloud_trace import CloudTraceSpanExporter
 
-                provider.add_span_processor(
-                    BatchSpanProcessor(CloudTraceSpanExporter(project_id=cfg.gcp_project_id))
-                )
-            except Exception:
-                pass
+                    provider.add_span_processor(
+                        BatchSpanProcessor(CloudTraceSpanExporter(project_id=cfg.gcp_project_id))
+                    )
+                    _attached_exporters.add(cloud_key)
+                except Exception:
+                    pass
 
         if cfg.otel_exporter_otlp_endpoint:
-            try:
-                from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
-                    OTLPSpanExporter,
-                )
-
-                provider.add_span_processor(
-                    BatchSpanProcessor(
-                        OTLPSpanExporter(endpoint=cfg.otel_exporter_otlp_endpoint)
+            otlp_key = f"otlp:{cfg.otel_exporter_otlp_endpoint}"
+            if otlp_key not in _attached_exporters:
+                try:
+                    from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+                        OTLPSpanExporter,
                     )
-                )
-            except Exception:
-                pass
 
-        if console_export:
+                    provider.add_span_processor(
+                        BatchSpanProcessor(
+                            OTLPSpanExporter(endpoint=cfg.otel_exporter_otlp_endpoint)
+                        )
+                    )
+                    _attached_exporters.add(otlp_key)
+                except Exception:
+                    pass
+
+        if console_export and "console" not in _attached_exporters:
             provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter()))
+            _attached_exporters.add("console")
 
     return provider
 

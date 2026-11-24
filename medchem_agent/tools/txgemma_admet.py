@@ -11,7 +11,7 @@ as ``model_backend="txgemma_physicochemical_fallback"``.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 from pydantic import ValidationError
@@ -207,7 +207,7 @@ def _evaluate_physicochemical_fallback(
 def predict_txgemma_admet_and_toxicity_profile(
     compound_id: str,
     smiles: str,
-    endpoints: list[str] | None = None,
+    endpoints: list[Literal["BBB_Martins", "hERG", "CYP3A4_Veith", "AMES", "ClinTox", "DILI"]] | None = None,
 ) -> dict[str, Any]:
     """Predict ADMET and toxicity endpoints using Google DeepMind TxGemma on GEAP Model Garden.
 

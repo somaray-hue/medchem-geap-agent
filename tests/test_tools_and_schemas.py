@@ -59,15 +59,24 @@ def test_all_tools_have_comprehensive_docstrings_and_descriptive_names() -> None
 
 
 def test_strict_pydantic_json_schemas_reject_extra_fields() -> None:
-    """Verify Pydantic schemas enforce strict extra='forbid' and export valid JSON Schema."""
+    """Verify Pydantic schemas enforce strict extra='forbid' and export valid JSON Schema for all tools."""
     with pytest.raises(ValidationError):
         PubChemResolveInput(query="lorlatinib", query_type="name", unexpected_param=123)  # type: ignore[call-arg]
 
     schemas = export_all_tool_json_schemas()
-    assert "PubChemResolveInput" in schemas
-    assert "QsarModelOutput" in schemas
-    assert "ToolErrorResponse" in schemas
-    assert schemas["PubChemResolveInput"]["additionalProperties"] is False
+    for expected_schema in (
+        "PubChemResolveInput",
+        "InternalElnQueryInput",
+        "InternalElnQueryOutput",
+        "QsarModelOutput",
+        "CroAssayOrderInput",
+        "CroAssayOrderOutput",
+        "CampaignMemoryCommitInput",
+        "CampaignMemoryCommitOutput",
+        "ToolErrorResponse",
+    ):
+        assert expected_schema in schemas
+        assert schemas[expected_schema]["additionalProperties"] is False
 
 
 def test_guided_error_handling_returns_recovery_instructions() -> None:
@@ -88,6 +97,22 @@ def test_guided_error_handling_returns_recovery_instructions() -> None:
     bad_admet = predict_txgemma_admet_and_toxicity_profile("X1", "invalid_smiles")
     assert bad_admet["status"] == "error"
     assert bad_admet["error_code"] == "INVALID_SMILES"
+
+    # CRO batch cap (> 50 compounds) enforced via CroAssayOrderInput
+    bad_cro = submit_external_cro_assay_order(
+        campaign_id="ALK-2026-Q4",
+        cro_vendor="Eurofins",
+        assay_panel="ALK WT IC50",
+        compound_count=75,
+        estimated_cost_usd=1000.0,
+    )
+    assert bad_cro["status"] == "error"
+    assert bad_cro["error_code"] == "INVALID_CRO_ORDER"
+    assert "recovery_instructions" in bad_cro
+
+    bad_eln = retrieve_internal_eln_series_and_tpp("A")
+    assert bad_eln["status"] == "error"
+    assert bad_eln["error_code"] == "INVALID_TARGET_SYMBOL"
 
 
 def test_rdkit_standardization_salt_stripping_and_crizotinib_vs_lorlatinib() -> None:

@@ -212,10 +212,26 @@ class ChemGuardrailsAndPolicyPlugin(BasePlugin):
                 retryable=False,
             ).model_dump(mode="json")
 
-        # Also block raw proprietary SMILES registered in the Enterprise ELN
-        proprietary_smiles = get_enterprise_eln_store().list_proprietary_smiles_set()
+        # Also block raw or RDKit-canonicalized proprietary SMILES registered in the Enterprise ELN
+        from rdkit import Chem
+
+        proprietary_raw = get_enterprise_eln_store().list_proprietary_smiles_set()
+        proprietary_canonical: set[str] = set(proprietary_raw)
+        for prop_smi in proprietary_raw:
+            prop_mol = Chem.MolFromSmiles(prop_smi)
+            if prop_mol is not None:
+                proprietary_canonical.add(Chem.MolToSmiles(prop_mol, canonical=True))
+
         for arg_val in tool_args.values():
-            if isinstance(arg_val, str) and arg_val.strip() in proprietary_smiles:
+            if not isinstance(arg_val, str):
+                continue
+            cleaned_arg = arg_val.strip()
+            matched = cleaned_arg in proprietary_canonical
+            if not matched and len(cleaned_arg) >= 6:
+                arg_mol = Chem.MolFromSmiles(cleaned_arg)
+                if arg_mol is not None:
+                    matched = Chem.MolToSmiles(arg_mol, canonical=True) in proprietary_canonical
+            if matched:
                 logger.warning(
                     "guardrails.ip_fence.blocked_smiles",
                     tool_name=tool.name,

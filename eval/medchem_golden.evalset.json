@@ -181,6 +181,12 @@
           "intermediate_data": {
             "tool_uses": [
               {
+                "name": "validate_and_score_candidate_macrocycle_design",
+                "args": {
+                  "proposed_smiles": "C[C@H]1Oc2cc(cnc2N)-c2c(nn(C)c2C#N)CN(C)C(=O)c2ccc(F)cc21"
+                }
+              },
+              {
                 "name": "export_validated_synthesis_candidates_to_eln",
                 "args": {
                   "campaign_id": "ALK-MACRO-2026-Q4",

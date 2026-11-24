@@ -23,9 +23,11 @@ from medchem_agent.config.settings import get_settings
 from medchem_agent.memory.async_consolidator import get_memory_consolidator
 from medchem_agent.memory.persistence import build_memory_service, build_session_service
 from medchem_agent.observability.logging import get_logger
+from medchem_agent.observability.tracing import get_tracer
 from medchem_agent.schemas.chemistry import export_all_tool_json_schemas
 
 logger = get_logger("main")
+tracer = get_tracer("medchem_agent.http")
 
 _runner: Runner | None = None
 
@@ -107,39 +109,44 @@ async def list_tool_schemas() -> dict[str, Any]:
 
 @fastapi_app.post("/query", response_model=QueryResponse)
 async def run_agent_query(request: QueryRequest) -> QueryResponse:
-    """Execute one medicinal chemistry agent turn with persistent session state."""
+    """Execute one medicinal chemistry agent turn with persistent session state and root OTel span."""
     if _runner is None:
         raise HTTPException(status_code=503, detail="Agent runner is not initialized.")
 
-    existing = await _runner.session_service.get_session(
-        app_name=adk_app.name,
-        user_id=request.user_id,
-        session_id=request.session_id,
-    )
-    if existing is None:
-        await _runner.session_service.create_session(
+    with tracer.start_as_current_span("http.post.query") as span:
+        span.set_attribute("http.route", "/query")
+        span.set_attribute("enduser.id", request.user_id)
+        span.set_attribute("session.id", request.session_id)
+
+        existing = await _runner.session_service.get_session(
             app_name=adk_app.name,
             user_id=request.user_id,
             session_id=request.session_id,
         )
+        if existing is None:
+            await _runner.session_service.create_session(
+                app_name=adk_app.name,
+                user_id=request.user_id,
+                session_id=request.session_id,
+            )
 
-    user_content = types.Content(role="user", parts=[types.Part.from_text(text=request.prompt)])
-    final_chunks: list[str] = []
-    async for event in _runner.run_async(
-        user_id=request.user_id,
-        session_id=request.session_id,
-        new_message=user_content,
-    ):
-        if event.content and event.content.parts:
-            for part in event.content.parts:
-                if getattr(part, "text", None):
-                    final_chunks.append(part.text)
+        user_content = types.Content(role="user", parts=[types.Part.from_text(text=request.prompt)])
+        final_chunks: list[str] = []
+        async for event in _runner.run_async(
+            user_id=request.user_id,
+            session_id=request.session_id,
+            new_message=user_content,
+        ):
+            if event.content and event.content.parts:
+                for part in event.content.parts:
+                    if getattr(part, "text", None):
+                        final_chunks.append(part.text)
 
-    return QueryResponse(
-        session_id=request.session_id,
-        response_text="\n".join(final_chunks).strip(),
-        pending_memory_jobs=get_memory_consolidator().pending_count,
-    )
+        return QueryResponse(
+            session_id=request.session_id,
+            response_text="\n".join(final_chunks).strip(),
+            pending_memory_jobs=get_memory_consolidator().pending_count,
+        )
 
 
 if __name__ == "__main__":

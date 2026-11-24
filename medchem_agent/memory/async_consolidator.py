@@ -59,11 +59,33 @@ class AsyncMemoryConsolidationManager:
         self._job_counter += 1
         return f"{prefix}-{self._job_counter:05d}"
 
+    @staticmethod
+    def _sanitize_session_for_memory(session: Session) -> Session:
+        """Return a deep copy of ``session`` with PII/PHI/secrets scrubbed before long-term storage."""
+        redactor = get_pii_redactor()
+        sanitized = session.model_copy(deep=True)
+        if getattr(sanitized, "state", None):
+            sanitized.state = redactor.redact_payload(sanitized.state)
+        for event in getattr(sanitized, "events", None) or []:
+            content = getattr(event, "content", None)
+            if not content or not getattr(content, "parts", None):
+                continue
+            for part in content.parts:
+                if getattr(part, "text", None):
+                    part.text = redactor.redact_text(part.text)
+                fc = getattr(part, "function_call", None)
+                if fc is not None and getattr(fc, "args", None):
+                    fc.args = redactor.redact_payload(fc.args)
+                fr = getattr(part, "function_response", None)
+                if fr is not None and getattr(fr, "response", None):
+                    fr.response = redactor.redact_payload(fr.response)
+        return sanitized
+
     def schedule_session_consolidation(self, session: Session) -> str:
-        """Schedule a non-blocking background task to consolidate a session into long-term memory.
+        """Schedule a non-blocking background task to consolidate a PII-scrubbed session into memory.
 
         Returns immediately with a ``job_id`` so the interactive turn finishes without waiting
-        for LLM memory extraction or database indexing.
+        for LLM memory extraction, PII redaction, or database indexing.
         """
         job_id = self._next_job_id("mem-session")
 
@@ -74,7 +96,10 @@ class AsyncMemoryConsolidationManager:
                     span.set_attribute("session.id", session.id)
                     try:
                         if self._memory_service is not None:
-                            await self._memory_service.add_session_to_memory(session)
+                            sanitized_session = await asyncio.to_thread(
+                                self._sanitize_session_for_memory, session
+                            )
+                            await self._memory_service.add_session_to_memory(sanitized_session)
                         result = MemoryJobResult(
                             job_id=job_id,
                             job_type="session_to_memory",
@@ -84,6 +109,7 @@ class AsyncMemoryConsolidationManager:
                             "memory.consolidation.completed",
                             job_id=job_id,
                             session_id=session.id,
+                            pii_scrubbed=True,
                             backend=type(self._memory_service).__name__
                             if self._memory_service
                             else "none",

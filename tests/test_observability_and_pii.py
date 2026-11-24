@@ -20,10 +20,18 @@ def test_pii_redactor_scrubs_phi_pii_and_credentials() -> None:
     redactor = PiiRedactor()
     raw = (
         "Contact dr.alice@hospital.org or 555-867-5309 for subject PAT-901234 "
-        "(SSN 123-45-6789) using Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
+        "(SSN 123-45-6789) using Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9 "
+        "or key " + "AQ." + "DummyKeyTokenValue1234567890."
     )
     scrubbed = redactor.redact_text(raw)
-    for sensitive in ("dr.alice@hospital.org", "555-867-5309", "PAT-901234", "123-45-6789", "eyJhbGci"):
+    for sensitive in (
+        "dr.alice@hospital.org",
+        "555-867-5309",
+        "PAT-901234",
+        "123-45-6789",
+        "eyJhbGci",
+        "DummyKeyTokenValue1234567890",
+    ):
         assert sensitive not in scrubbed
     assert "[REDACTED_EMAIL]" in scrubbed
     assert "[REDACTED_PHONE]" in scrubbed
@@ -72,20 +80,29 @@ def test_structured_json_logging_with_trace_correlation_and_pii_scrubbing() -> N
 
 @pytest.mark.asyncio
 async def test_observability_plugin_captures_intent_vs_outcome_and_otel_spans() -> None:
-    """Verify ChemObservabilityPlugin logs paired INTENT & OUTCOME records and linked OTel spans."""
+    """Verify ChemObservabilityPlugin logs paired INTENT & OUTCOME records and linked parent-child OTel spans."""
     exporter = InMemorySpanExporter()
     configure_tracing(custom_exporter=exporter)
 
+    log_buf = io.StringIO()
+    configure_structured_logging(stream=log_buf)
+
     plugin = ChemObservabilityPlugin(enable_async_memory_on_run_end=False)
+    fake_agent = SimpleNamespace(name="sar_mmpa_modeling_agent")
+    fake_cb_ctx = SimpleNamespace(invocation_id="inv-trace-01")
     fake_tool = SimpleNamespace(name="standardize_and_compute_molecular_descriptors")
     fake_ctx = SimpleNamespace(agent_name="sar_mmpa_modeling_agent", function_call_id="call-42")
+    inner_tracer = get_tracer("medchem_agent.tools.rdkit")
 
-    # 1. Successful tool call records INTENT then matching OUTCOME
+    # 1. Agent -> Tool -> Inner tool execution forms one linked parent-child OTel trace tree
+    await plugin.before_agent_callback(agent=fake_agent, callback_context=fake_cb_ctx)
     await plugin.before_tool_callback(
         tool=fake_tool,
         tool_args={"molecules": [{"compound_id": "LORL", "smiles": "CCO"}], "email": "x@y.com"},
         tool_context=fake_ctx,
     )
+    with inner_tracer.start_as_current_span("tool.standardize_and_compute_molecular_descriptors"):
+        pass
     await plugin.after_tool_callback(
         tool=fake_tool,
         tool_args={"molecules": [{"compound_id": "LORL", "smiles": "CCO"}]},
@@ -106,6 +123,7 @@ async def test_observability_plugin_captures_intent_vs_outcome_and_otel_spans() 
         tool_context=fake_ctx_err,
         result={"status": "error", "error_code": "ALL_SMILES_INVALID"},
     )
+    await plugin.after_agent_callback(agent=fake_agent, callback_context=fake_cb_ctx)
 
     records = plugin.audit_records
     assert len(records) == 4
@@ -118,7 +136,30 @@ async def test_observability_plugin_captures_intent_vs_outcome_and_otel_spans() 
     assert records[3]["error_code"] == "ALL_SMILES_INVALID"
 
     finished_spans = exporter.get_finished_spans()
+    agent_spans = [s for s in finished_spans if s.name == "adk.agent.sar_mmpa_modeling_agent"]
     tool_spans = [s for s in finished_spans if s.name == "adk.tool.standardize_and_compute_molecular_descriptors"]
+    inner_spans = [s for s in finished_spans if s.name == "tool.standardize_and_compute_molecular_descriptors"]
+    assert len(agent_spans) == 1
     assert len(tool_spans) == 2
-    assert tool_spans[0].attributes["agentops.intent_outcome_match"] is True
+    assert len(inner_spans) == 1
+
+    # Verify true parent-child trace linkage: adk.agent -> adk.tool -> tool.*
+    agent_span = agent_spans[0]
+    first_tool_span = tool_spans[0]
+    inner_span = inner_spans[0]
+    assert first_tool_span.context.trace_id == agent_span.context.trace_id
+    assert first_tool_span.parent is not None
+    assert first_tool_span.parent.span_id == agent_span.context.span_id
+    assert inner_span.context.trace_id == agent_span.context.trace_id
+    assert inner_span.parent is not None
+    assert inner_span.parent.span_id == first_tool_span.context.span_id
+    assert first_tool_span.attributes["agentops.intent_outcome_match"] is True
     assert tool_spans[1].attributes["agentops.intent_outcome_match"] is False
+
+    # Verify emitted INTENT & OUTCOME JSON logs carry correlated trace_id & span_id
+    emitted_logs = [json.loads(line) for line in log_buf.getvalue().strip().splitlines()]
+    intent_logs = [entry for entry in emitted_logs if entry.get("event") == "agent.tool.intent"]
+    outcome_logs = [entry for entry in emitted_logs if entry.get("event") == "agent.tool.outcome"]
+    expected_trace_hex = format(agent_span.context.trace_id, "032x")
+    assert intent_logs and intent_logs[0]["trace_id"] == expected_trace_hex
+    assert outcome_logs and outcome_logs[0]["trace_id"] == expected_trace_hex

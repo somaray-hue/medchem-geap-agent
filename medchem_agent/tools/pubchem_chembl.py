@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import quote
 
 import httpx
@@ -26,6 +26,8 @@ from medchem_agent.schemas.chemistry import (
     BioactivityRecord,
     ChemblBioactivityInput,
     ChemblBioactivityOutput,
+    InternalElnQueryInput,
+    InternalElnQueryOutput,
     LiteratureArticle,
     LiteratureSearchInput,
     LiteratureSearchOutput,
@@ -226,7 +228,7 @@ def _is_macrocycle(mol: Chem.Mol) -> bool:
 
 def resolve_compound_identifiers_from_pubchem(
     query: str,
-    query_type: str = "name",
+    query_type: Literal["name", "smiles"] = "name",
 ) -> dict[str, Any]:
     """Resolve a compound name or SMILES string into verified PubChem identifiers and descriptors.
 
@@ -368,7 +370,7 @@ def resolve_compound_identifiers_from_pubchem(
 
 def fetch_target_bioactivities_from_chembl(
     target_query: str,
-    standard_type: str = "IC50",
+    standard_type: Literal["IC50", "Ki", "EC50", "Kd"] = "IC50",
     max_records: int = 25,
 ) -> dict[str, Any]:
     """Retrieve curated target bioactivity records (IC50/Ki/pChEMBL) from ChEMBL.
@@ -629,20 +631,24 @@ def retrieve_internal_eln_series_and_tpp(target_symbol: str) -> dict[str, Any]:
         target_symbol: Gene symbol for the drug target (e.g. ``"ALK"``, ``"ROS1"``, ``"EGFR"``).
 
     Returns:
-        Dictionary containing Target Product Profile constraints, AlphaFold DB accession,
-        proprietary internal compounds, and relevant historical campaign notes.
+        Dictionary matching ``InternalElnQueryOutput`` containing Target Product Profile constraints,
+        AlphaFold DB accession, proprietary internal compounds, and historical campaign notes,
+        or ``ToolErrorResponse`` if validation or lookup fails.
     """
     with tracer.start_as_current_span("tool.retrieve_internal_eln_series_and_tpp") as span:
-        cleaned = target_symbol.strip().upper()
-        span.set_attribute("medchem.target_symbol", cleaned)
-        if len(cleaned) < 2:
+        try:
+            validated = InternalElnQueryInput(target_symbol=target_symbol)
+        except ValidationError as exc:
             return ToolErrorResponse(
                 error_code="INVALID_TARGET_SYMBOL",
-                message="Target gene symbol must be at least 2 characters (e.g., 'ALK', 'ROS1', 'EGFR').",
-                recovery_instructions="Retry with an official HGNC gene symbol such as 'ALK'.",
+                message=f"Invalid target symbol for internal ELN query: {exc.errors()[0]['msg']}",
+                recovery_instructions="Retry with an official HGNC gene symbol of at least 2 characters (e.g., 'ALK', 'ROS1', 'EGFR').",
                 suggested_next_tool="retrieve_internal_eln_series_and_tpp",
                 retryable=True,
             ).model_dump(mode="json")
+
+        cleaned = validated.target_symbol.upper()
+        span.set_attribute("medchem.target_symbol", cleaned)
 
         store = get_enterprise_eln_store()
         tpp = store.get_tpp(cleaned)
@@ -662,15 +668,13 @@ def retrieve_internal_eln_series_and_tpp(target_symbol: str) -> dict[str, Any]:
                 retryable=False,
             ).model_dump(mode="json")
 
-        return {
-            "status": "success",
-            "perimeter": "ENTERPRISE_INTERNAL_ONLY",
-            "target_symbol": cleaned,
-            "target_product_profile": tpp,
-            "proprietary_compounds": proprietary,
-            "prior_campaign_notes": notes,
-            "ip_handling_notice": (
+        return InternalElnQueryOutput(
+            target_symbol=cleaned,
+            target_product_profile=tpp,
+            proprietary_compounds=proprietary,
+            prior_campaign_notes=notes,
+            ip_handling_notice=(
                 "Proprietary compounds returned here are INTERNAL_ONLY. "
                 "Do NOT pass their IDs or SMILES to external PubChem/ChEMBL tools."
             ),
-        }
+        ).model_dump(mode="json")

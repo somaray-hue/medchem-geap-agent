@@ -11,7 +11,7 @@ Implements Google DeepMind's Nov 2026 Agentic Cheminformatics methodology:
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 from pydantic import ValidationError
@@ -271,7 +271,10 @@ def run_matched_molecular_pair_rigidification_analysis(
         for item in validated.compounds:
             if item.pchembl_value is None:
                 continue
-            featurized = _featurize_molecule(item.compound_id, item.smiles, item.pchembl_value)
+            try:
+                featurized = _featurize_molecule(item.compound_id, item.smiles, item.pchembl_value)
+            except Exception:
+                continue
             if featurized is None:
                 continue
             mol, desc = featurized
@@ -358,7 +361,7 @@ def run_matched_molecular_pair_rigidification_analysis(
 
 def train_scaffold_split_potency_qsar_model(
     compounds: list[dict[str, Any]],
-    split_strategy: str = "scaffold",
+    split_strategy: Literal["scaffold", "chronological"] = "scaffold",
     candidate_smiles: list[str] | None = None,
 ) -> dict[str, Any]:
     """Train and benchmark leak-free molecular potency QSAR models using scaffold or chronological splits.
@@ -383,7 +386,7 @@ def train_scaffold_split_potency_qsar_model(
         try:
             validated = QsarModelInput(
                 compounds=compounds,  # type: ignore[arg-type]
-                split_strategy=split_strategy,  # type: ignore[arg-type]
+                split_strategy=split_strategy,
                 candidate_smiles=candidate_smiles or [],
             )
         except ValidationError as exc:
@@ -402,7 +405,10 @@ def train_scaffold_split_potency_qsar_model(
         for entry in validated.compounds:
             if entry.pchembl_value is None:
                 continue
-            featurized = _featurize_molecule(entry.compound_id, entry.smiles, entry.pchembl_value)
+            try:
+                featurized = _featurize_molecule(entry.compound_id, entry.smiles, entry.pchembl_value)
+            except Exception:
+                continue
             if featurized is None:
                 continue
             mol, desc = featurized

@@ -101,6 +101,7 @@ async def test_enterprise_eln_store_and_async_memory_consolidation(tmp_path: Pat
     )
 
     # Schedule non-blocking background note indexing containing PII that must be redacted
+    dummy_api_key = "AIza" + "SyDummyRedactionTest0000000000"
     job_id = consolidator.schedule_campaign_note_indexing(
         campaign_id="ALK-2026-Q4",
         target_symbol="ALK",
@@ -108,7 +109,7 @@ async def test_enterprise_eln_store_and_async_memory_consolidation(tmp_path: Pat
             "Cyclization improved CNS-MPO for ALK L1196M; reviewed by dr.jane@biopharma.com "
             "using subject PAT-441122."
         ),
-        metadata={"api_key": "AIzaSySecretKeyValue1234567890", "rot_bonds": 0},
+        metadata={"api_key": dummy_api_key, "rot_bonds": 0},
     )
     assert job_id.startswith("mem-note-")
 
@@ -125,3 +126,60 @@ async def test_enterprise_eln_store_and_async_memory_consolidation(tmp_path: Pat
     assert "[REDACTED_EMAIL]" in stored_summary
     assert "[REDACTED_PATIENT_ID]" in stored_summary
     assert hits[0]["metadata"]["api_key"] == "[REDACTED_SECRET]"
+
+
+@pytest.mark.asyncio
+async def test_session_consolidation_scrubs_pii_before_memory_storage(tmp_path: Path) -> None:
+    """Verify schedule_session_consolidation scrubs PII/PHI from session events before persisting."""
+    from google.adk.events import Event
+    from google.adk.sessions import Session
+    from google.genai import types
+
+    captured_sessions: list[Session] = []
+
+    class _RecordingMemoryService:
+        async def add_session_to_memory(self, session: Session) -> None:
+            captured_sessions.append(session)
+
+    raw_text = (
+        "Chemist alice@biopharma.org reviewed patient PAT-778899 (SSN 123-45-6789) "
+        "on lorlatinib ALK campaign."
+    )
+    session = Session(
+        id="sess_pii_test_01",
+        app_name="medchem_geap_agent",
+        user_id="chemist_1",
+        state={"notes": "owner bob@pharma.io", "api_key": "secret-val"},
+        events=[
+            Event(
+                invocation_id="inv-1",
+                author="user",
+                content=types.Content(role="user", parts=[types.Part.from_text(text=raw_text)]),
+            )
+        ],
+    )
+
+    store = EnterpriseElnStore(db_path=tmp_path / "eln.db")
+    consolidator = AsyncMemoryConsolidationManager(
+        memory_service=_RecordingMemoryService(),  # type: ignore[arg-type]
+        eln_store=store,
+    )
+    job_id = consolidator.schedule_session_consolidation(session)
+    assert job_id.startswith("mem-session-")
+    results = await consolidator.drain(timeout_seconds=5.0)
+    assert len(results) == 1 and results[0].status == "completed"
+    assert len(captured_sessions) == 1
+
+    stored_session = captured_sessions[0]
+    stored_text = stored_session.events[0].content.parts[0].text
+    assert "alice@biopharma.org" not in stored_text
+    assert "PAT-778899" not in stored_text
+    assert "123-45-6789" not in stored_text
+    assert "[REDACTED_EMAIL]" in stored_text
+    assert "[REDACTED_PATIENT_ID]" in stored_text
+    assert "[REDACTED_SSN]" in stored_text
+    assert "lorlatinib" in stored_text
+    assert stored_session.state["api_key"] == "[REDACTED_SECRET]"
+    assert "[REDACTED_EMAIL]" in stored_session.state["notes"]
+    # Original live session was NOT mutated in place
+    assert "alice@biopharma.org" in session.events[0].content.parts[0].text

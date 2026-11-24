@@ -27,6 +27,10 @@ from medchem_agent.observability.logging import get_logger
 from medchem_agent.observability.pii_redactor import get_pii_redactor
 from medchem_agent.observability.tracing import get_tracer
 from medchem_agent.schemas.chemistry import (
+    CampaignMemoryCommitInput,
+    CampaignMemoryCommitOutput,
+    CroAssayOrderInput,
+    CroAssayOrderOutput,
     ElnExportInput,
     ElnExportOutput,
     ToolErrorResponse,
@@ -104,52 +108,67 @@ def export_validated_synthesis_candidates_to_eln(
             mol.SetProp("Target", validated.target_symbol.upper())
             verified_mols.append((can_smi, mol))
 
-        # Explicit Human-in-the-Loop (HITL) Confirmation Gate via ADK ToolContext
-        if tool_context is not None:
-            confirmation = tool_context.tool_confirmation
-            if confirmation is None:
-                tool_context.request_confirmation(
-                    hint=(
-                        f"APPROVAL REQUIRED: Export {len(verified_mols)} candidate structure(s) for "
-                        f"campaign '{validated.campaign_id}' (target {validated.target_symbol.upper()}, "
-                        f"est. synthesis cost ${validated.estimated_synthesis_cost_usd:,.2f}) to Enterprise ELN?"
-                    ),
-                    payload={
-                        "campaign_id": validated.campaign_id,
-                        "target_symbol": validated.target_symbol.upper(),
-                        "candidate_smiles": [s for s, _ in verified_mols],
-                        "estimated_synthesis_cost_usd": validated.estimated_synthesis_cost_usd,
-                        "approved": False,
-                    },
-                )
-                logger.info(
-                    "hitl.confirmation.requested",
-                    campaign_id=validated.campaign_id,
-                    compound_count=len(verified_mols),
-                    estimated_cost_usd=validated.estimated_synthesis_cost_usd,
-                )
-                return ElnExportOutput(
-                    status="pending_confirmation",
-                    campaign_id=validated.campaign_id,
-                    exported_compound_count=0,
-                    audit_message=(
-                        "Execution paused awaiting explicit medicinal-chemist approval via ADK HITL hook."
-                    ),
-                ).model_dump(mode="json")
+        # Explicit Human-in-the-Loop (HITL) Confirmation Gate via ADK ToolContext (fail closed)
+        if tool_context is None:
+            logger.warning(
+                "hitl.confirmation.missing_context",
+                campaign_id=validated.campaign_id,
+                compound_count=len(verified_mols),
+            )
+            return ElnExportOutput(
+                status="pending_confirmation",
+                campaign_id=validated.campaign_id,
+                exported_compound_count=0,
+                audit_message=(
+                    "ELN export blocked (fail-closed): missing ADK ToolContext required for "
+                    "explicit human medicinal-chemist confirmation."
+                ),
+            ).model_dump(mode="json")
 
-            if not confirmation.confirmed:
-                logger.info(
-                    "hitl.confirmation.rejected",
-                    campaign_id=validated.campaign_id,
-                )
-                return ElnExportOutput(
-                    status="rejected",
-                    campaign_id=validated.campaign_id,
-                    exported_compound_count=0,
-                    audit_message=(
-                        "ELN export aborted: human medicinal-chemist reviewer rejected the confirmation request."
-                    ),
-                ).model_dump(mode="json")
+        confirmation = tool_context.tool_confirmation
+        if confirmation is None:
+            tool_context.request_confirmation(
+                hint=(
+                    f"APPROVAL REQUIRED: Export {len(verified_mols)} candidate structure(s) for "
+                    f"campaign '{validated.campaign_id}' (target {validated.target_symbol.upper()}, "
+                    f"est. synthesis cost ${validated.estimated_synthesis_cost_usd:,.2f}) to Enterprise ELN?"
+                ),
+                payload={
+                    "campaign_id": validated.campaign_id,
+                    "target_symbol": validated.target_symbol.upper(),
+                    "candidate_smiles": [s for s, _ in verified_mols],
+                    "estimated_synthesis_cost_usd": validated.estimated_synthesis_cost_usd,
+                    "approved": False,
+                },
+            )
+            logger.info(
+                "hitl.confirmation.requested",
+                campaign_id=validated.campaign_id,
+                compound_count=len(verified_mols),
+                estimated_cost_usd=validated.estimated_synthesis_cost_usd,
+            )
+            return ElnExportOutput(
+                status="pending_confirmation",
+                campaign_id=validated.campaign_id,
+                exported_compound_count=0,
+                audit_message=(
+                    "Execution paused awaiting explicit medicinal-chemist approval via ADK HITL hook."
+                ),
+            ).model_dump(mode="json")
+
+        if not confirmation.confirmed:
+            logger.info(
+                "hitl.confirmation.rejected",
+                campaign_id=validated.campaign_id,
+            )
+            return ElnExportOutput(
+                status="rejected",
+                campaign_id=validated.campaign_id,
+                exported_compound_count=0,
+                audit_message=(
+                    "ELN export aborted: human medicinal-chemist reviewer rejected the confirmation request."
+                ),
+            ).model_dump(mode="json")
 
         # Confirmed: write SDF + PII-redacted provenance manifest
         settings = get_settings()
@@ -245,33 +264,48 @@ def submit_external_cro_assay_order(
         has_high_risk_admet_flag: True if TxGemma flagged any HIGH_RISK ADMET/toxicity liability.
 
     Returns:
-        Structured order confirmation dictionary or ``ToolErrorResponse``.
+        Structured order confirmation dictionary matching ``CroAssayOrderOutput`` or ``ToolErrorResponse``.
     """
-    if compound_count < 1 or estimated_cost_usd < 0:
-        return ToolErrorResponse(
-            error_code="INVALID_CRO_ORDER",
-            message="compound_count must be >= 1 and estimated_cost_usd must be >= 0.",
-            recovery_instructions="Correct the batch count and cost estimate before resubmitting.",
-            suggested_next_tool="submit_external_cro_assay_order",
-            retryable=True,
-        ).model_dump(mode="json")
+    with tracer.start_as_current_span("tool.submit_external_cro_assay_order") as span:
+        span.set_attribute("medchem.campaign_id", campaign_id)
+        try:
+            validated = CroAssayOrderInput(
+                campaign_id=campaign_id,
+                cro_vendor=cro_vendor,
+                assay_panel=assay_panel,
+                compound_count=compound_count,
+                estimated_cost_usd=estimated_cost_usd,
+                has_high_risk_admet_flag=has_high_risk_admet_flag,
+            )
+        except ValidationError as exc:
+            return ToolErrorResponse(
+                error_code="INVALID_CRO_ORDER",
+                message=f"Invalid CRO assay order payload: {exc.errors()[0]['msg']}",
+                recovery_instructions=(
+                    "Provide campaign_id (>= 3 chars), cro_vendor, assay_panel, compound_count between 1 and 50, "
+                    "and non-negative estimated_cost_usd."
+                ),
+                suggested_next_tool="submit_external_cro_assay_order",
+                retryable=True,
+            ).model_dump(mode="json")
 
-    logger.info(
-        "cro_assay_order.queued",
-        campaign_id=campaign_id,
-        cro_vendor=cro_vendor,
-        compound_count=compound_count,
-        estimated_cost_usd=estimated_cost_usd,
-    )
-    return {
-        "status": "queued_for_dispatch",
-        "campaign_id": campaign_id,
-        "cro_vendor": cro_vendor,
-        "assay_panel": assay_panel,
-        "compound_count": compound_count,
-        "estimated_cost_usd": estimated_cost_usd,
-        "disclaimer": "Order queued in sandbox mode; no live external CRO spend committed.",
-    }
+        span.set_attribute("medchem.cro_vendor", validated.cro_vendor)
+        span.set_attribute("medchem.compound_count", validated.compound_count)
+        logger.info(
+            "cro_assay_order.queued",
+            campaign_id=validated.campaign_id,
+            cro_vendor=validated.cro_vendor,
+            compound_count=validated.compound_count,
+            estimated_cost_usd=validated.estimated_cost_usd,
+        )
+        return CroAssayOrderOutput(
+            campaign_id=validated.campaign_id,
+            cro_vendor=validated.cro_vendor,
+            assay_panel=validated.assay_panel,
+            compound_count=validated.compound_count,
+            estimated_cost_usd=validated.estimated_cost_usd,
+            disclaimer="Order queued in sandbox mode; no live external CRO spend committed.",
+        ).model_dump(mode="json")
 
 
 async def commit_design_decision_to_campaign_memory(
@@ -292,33 +326,45 @@ async def commit_design_decision_to_campaign_memory(
         key_canonical_smiles: Optional list of RDKit-verified canonical SMILES to attach.
 
     Returns:
-        Immediate acknowledgement dictionary with the background ``memory_job_id``.
+        Immediate acknowledgement dictionary matching ``CampaignMemoryCommitOutput`` or ``ToolErrorResponse``.
     """
-    if len(decision_summary.strip()) < 10:
-        return ToolErrorResponse(
-            error_code="SUMMARY_TOO_SHORT",
-            message="Campaign decision summary must be at least 10 characters.",
-            recovery_instructions="Provide a meaningful SAR/TPP rationale before committing to long-term memory.",
-            suggested_next_tool="commit_design_decision_to_campaign_memory",
-            retryable=True,
-        ).model_dump(mode="json")
+    with tracer.start_as_current_span("tool.commit_design_decision_to_campaign_memory") as span:
+        span.set_attribute("medchem.campaign_id", campaign_id)
+        try:
+            validated = CampaignMemoryCommitInput(
+                campaign_id=campaign_id,
+                target_symbol=target_symbol,
+                decision_summary=decision_summary,
+                key_canonical_smiles=key_canonical_smiles or [],
+            )
+        except ValidationError as exc:
+            return ToolErrorResponse(
+                error_code="SCHEMA_VALIDATION_ERROR",
+                message=f"Invalid campaign memory commit payload: {exc.errors()[0]['msg']}",
+                recovery_instructions=(
+                    "Provide campaign_id (>= 3 chars), target_symbol (>= 2 chars), and a meaningful "
+                    "decision_summary of at least 10 characters."
+                ),
+                suggested_next_tool="commit_design_decision_to_campaign_memory",
+                retryable=True,
+            ).model_dump(mode="json")
 
-    consolidator = get_memory_consolidator()
-    job_id = consolidator.schedule_campaign_note_indexing(
-        campaign_id=campaign_id,
-        target_symbol=target_symbol,
-        summary=decision_summary,
-        metadata={"canonical_smiles": key_canonical_smiles or []},
-    )
-    return {
-        "status": "scheduled_async",
-        "memory_job_id": job_id,
-        "campaign_id": campaign_id,
-        "target_symbol": target_symbol.upper(),
-        "message": (
-            "Campaign decision queued for non-blocking PII-scrubbed background indexing."
-        ),
-    }
+        consolidator = get_memory_consolidator()
+        job_id = consolidator.schedule_campaign_note_indexing(
+            campaign_id=validated.campaign_id,
+            target_symbol=validated.target_symbol,
+            summary=validated.decision_summary,
+            metadata={"canonical_smiles": validated.key_canonical_smiles},
+        )
+        span.set_attribute("memory.job_id", job_id)
+        return CampaignMemoryCommitOutput(
+            memory_job_id=job_id,
+            campaign_id=validated.campaign_id,
+            target_symbol=validated.target_symbol.upper(),
+            message=(
+                "Campaign decision queued for non-blocking PII-scrubbed background indexing."
+            ),
+        ).model_dump(mode="json")
 
 
 # ADK FunctionTool wrappers with native Human-in-the-Loop confirmation policies

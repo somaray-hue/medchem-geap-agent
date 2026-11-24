@@ -422,6 +422,71 @@ class ElnExportOutput(StrictSchema):
     audit_message: str
 
 
+class InternalElnQueryInput(StrictSchema):
+    """Input schema for querying the internal Enterprise ELN & TPP knowledge store."""
+
+    target_symbol: str = Field(
+        ...,
+        min_length=2,
+        max_length=32,
+        description="Official HGNC target gene symbol (e.g. 'ALK', 'ROS1', 'EGFR').",
+    )
+
+
+class InternalElnQueryOutput(StrictSchema):
+    """Structured Enterprise ELN Target Product Profile and proprietary series payload."""
+
+    status: Literal["success"] = "success"
+    perimeter: Literal["ENTERPRISE_INTERNAL_ONLY"] = "ENTERPRISE_INTERNAL_ONLY"
+    target_symbol: str
+    target_product_profile: dict[str, Any] | None = None
+    proprietary_compounds: list[dict[str, Any]]
+    prior_campaign_notes: list[dict[str, Any]]
+    ip_handling_notice: str
+
+
+class CroAssayOrderInput(StrictSchema):
+    """Input schema for submitting a HITL-governed external CRO wet-lab assay order."""
+
+    campaign_id: str = Field(..., min_length=3, max_length=64)
+    cro_vendor: str = Field(..., min_length=2, max_length=128)
+    assay_panel: str = Field(..., min_length=3, max_length=500)
+    compound_count: int = Field(..., ge=1, le=50)
+    estimated_cost_usd: float = Field(..., ge=0.0, le=1_000_000.0)
+    has_high_risk_admet_flag: bool = False
+
+
+class CroAssayOrderOutput(StrictSchema):
+    """Structured confirmation payload for a queued external CRO assay order."""
+
+    status: Literal["queued_for_dispatch"] = "queued_for_dispatch"
+    campaign_id: str
+    cro_vendor: str
+    assay_panel: str
+    compound_count: int = Field(..., ge=1, le=50)
+    estimated_cost_usd: float = Field(..., ge=0.0)
+    disclaimer: str
+
+
+class CampaignMemoryCommitInput(StrictSchema):
+    """Input schema for scheduling non-blocking asynchronous campaign memory indexing."""
+
+    campaign_id: str = Field(..., min_length=3, max_length=64)
+    target_symbol: str = Field(..., min_length=2, max_length=32)
+    decision_summary: str = Field(..., min_length=10, max_length=4000)
+    key_canonical_smiles: list[str] = Field(default_factory=list, max_length=50)
+
+
+class CampaignMemoryCommitOutput(StrictSchema):
+    """Immediate non-blocking acknowledgement for a scheduled async campaign memory job."""
+
+    status: Literal["scheduled_async"] = "scheduled_async"
+    memory_job_id: str
+    campaign_id: str
+    target_symbol: str
+    message: str
+
+
 class SelfCritiqueReport(StrictSchema):
     """Structured output schema for the Scientific Self-Critic evaluation agent."""
 
@@ -451,6 +516,8 @@ def export_all_tool_json_schemas() -> dict[str, dict[str, Any]]:
         ChemblBioactivityOutput,
         LiteratureSearchInput,
         LiteratureSearchOutput,
+        InternalElnQueryInput,
+        InternalElnQueryOutput,
         StandardizeMoleculesInput,
         StandardizeMoleculesOutput,
         MmpaAnalysisInput,
@@ -463,6 +530,10 @@ def export_all_tool_json_schemas() -> dict[str, dict[str, Any]]:
         CandidateDesignOutput,
         ElnExportInput,
         ElnExportOutput,
+        CroAssayOrderInput,
+        CroAssayOrderOutput,
+        CampaignMemoryCommitInput,
+        CampaignMemoryCommitOutput,
         SelfCritiqueReport,
         ToolErrorResponse,
     ]

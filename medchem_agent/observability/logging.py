@@ -91,6 +91,12 @@ def configure_structured_logging(
     )
 
 
-def get_logger(name: str = "medchem_agent") -> structlog.stdlib.BoundLogger:
-    """Return a structured JSON logger bound with component metadata."""
-    return structlog.get_logger(name).bind(component=name)
+def get_logger(name: str = "medchem_agent") -> Any:
+    """Return a lazy structured JSON logger bound with component metadata.
+
+    Passing ``component=name`` directly to ``structlog.get_logger`` preserves
+    ``BoundLoggerLazyProxy`` semantics so module-level loggers imported before
+    ``configure_structured_logging()`` automatically inherit JSON rendering,
+    OpenTelemetry trace correlation, and PII redaction.
+    """
+    return structlog.get_logger(name, component=name)

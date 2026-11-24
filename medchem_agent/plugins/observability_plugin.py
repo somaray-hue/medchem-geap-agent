@@ -22,6 +22,8 @@ from google.adk.plugins import BasePlugin
 from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.tool_context import ToolContext
 from google.genai import types
+from opentelemetry import context as otel_context
+from opentelemetry import trace
 from opentelemetry.trace import Span, Status, StatusCode
 
 from medchem_agent.memory.async_consolidator import get_memory_consolidator
@@ -48,6 +50,23 @@ _TOOL_EXPECTED_EFFECTS: dict[str, str] = {
 }
 
 
+def _safe_detach_context(token: Any | None) -> None:
+    """Detach an OpenTelemetry ContextVar token safely across async generator boundaries."""
+    if token is None:
+        return
+    try:
+        otel_context.detach(token)
+    except ValueError:
+        # Async generators running parallel branches may close in a different ContextVar frame
+        pass
+
+
+@dataclass
+class _PendingAgentSpan:
+    span: Span
+    context_token: Any | None = None
+
+
 @dataclass
 class _PendingToolIntent:
     tool_name: str
@@ -55,6 +74,7 @@ class _PendingToolIntent:
     expected_effect: str
     started_monotonic: float
     span: Span
+    context_token: Any | None = None
 
 
 class ChemObservabilityPlugin(BasePlugin):
@@ -68,7 +88,7 @@ class ChemObservabilityPlugin(BasePlugin):
         super().__init__(name=name)
         self._enable_async_memory = enable_async_memory_on_run_end
         self._in_flight_intents: dict[str, _PendingToolIntent] = {}
-        self._agent_spans: dict[str, Span] = {}
+        self._agent_spans: dict[str, _PendingAgentSpan] = {}
         self._audit_records: list[dict[str, Any]] = []
 
     @property
@@ -82,7 +102,7 @@ class ChemObservabilityPlugin(BasePlugin):
         agent: BaseAgent,
         callback_context: CallbackContext,
     ) -> types.Content | None:
-        """Start an OpenTelemetry span for each specialist agent execution."""
+        """Start and attach an OpenTelemetry span for each specialist agent execution."""
         key = f"{callback_context.invocation_id}:{agent.name}"
         span = tracer.start_span(
             f"adk.agent.{agent.name}",
@@ -91,7 +111,8 @@ class ChemObservabilityPlugin(BasePlugin):
                 "adk.invocation_id": str(callback_context.invocation_id),
             },
         )
-        self._agent_spans[key] = span
+        token = otel_context.attach(trace.set_span_in_context(span))
+        self._agent_spans[key] = _PendingAgentSpan(span=span, context_token=token)
         logger.info(
             "agent.execution.started",
             agent_name=agent.name,
@@ -105,17 +126,18 @@ class ChemObservabilityPlugin(BasePlugin):
         agent: BaseAgent,
         callback_context: CallbackContext,
     ) -> types.Content | None:
-        """End the specialist agent's OpenTelemetry span."""
+        """End and detach the specialist agent's OpenTelemetry span."""
         key = f"{callback_context.invocation_id}:{agent.name}"
-        span = self._agent_spans.pop(key, None)
-        if span is not None:
-            span.set_status(Status(StatusCode.OK))
-            span.end()
+        pending = self._agent_spans.pop(key, None)
         logger.info(
             "agent.execution.completed",
             agent_name=agent.name,
             invocation_id=str(callback_context.invocation_id),
         )
+        if pending is not None:
+            pending.span.set_status(Status(StatusCode.OK))
+            pending.span.end()
+            _safe_detach_context(pending.context_token)
         return None
 
     async def before_tool_callback(
@@ -125,7 +147,7 @@ class ChemObservabilityPlugin(BasePlugin):
         tool_args: dict[str, Any],
         tool_context: ToolContext,
     ) -> dict[str, Any] | None:
-        """Capture structured JSON Intent + start OTel span BEFORE tool execution."""
+        """Capture structured JSON Intent + start and attach active OTel span BEFORE tool execution."""
         call_id = str(getattr(tool_context, "function_call_id", None) or f"{tool.name}:{time.monotonic_ns()}")
         redacted_args = get_pii_redactor().redact_payload(tool_args)
         expected_effect = _TOOL_EXPECTED_EFFECTS.get(
@@ -141,12 +163,14 @@ class ChemObservabilityPlugin(BasePlugin):
                 "agentops.intent": expected_effect,
             },
         )
+        token = otel_context.attach(trace.set_span_in_context(span))
         self._in_flight_intents[call_id] = _PendingToolIntent(
             tool_name=tool.name,
             agent_name=str(getattr(tool_context, "agent_name", "unknown")),
             expected_effect=expected_effect,
             started_monotonic=time.monotonic(),
             span=span,
+            context_token=token,
         )
 
         intent_event = {
@@ -195,17 +219,6 @@ class ChemObservabilityPlugin(BasePlugin):
         }
         error_code = result.get("error_code") if isinstance(result, dict) else None
 
-        if pending is not None:
-            pending.span.set_attribute("agentops.outcome.status", outcome_status)
-            pending.span.set_attribute("agentops.intent_outcome_match", intent_outcome_match)
-            pending.span.set_attribute("agentops.duration_ms", duration_ms)
-            if error_code:
-                pending.span.set_attribute("agentops.error_code", str(error_code))
-                pending.span.set_status(Status(StatusCode.ERROR, str(error_code)))
-            else:
-                pending.span.set_status(Status(StatusCode.OK))
-            pending.span.end()
-
         outcome_event = {
             "event_phase": "OUTCOME",
             "call_id": call_id,
@@ -219,6 +232,19 @@ class ChemObservabilityPlugin(BasePlugin):
         }
         self._audit_records.append(outcome_event)
         logger.info("agent.tool.outcome", **outcome_event)
+
+        if pending is not None:
+            pending.span.set_attribute("agentops.outcome.status", outcome_status)
+            pending.span.set_attribute("agentops.intent_outcome_match", intent_outcome_match)
+            pending.span.set_attribute("agentops.duration_ms", duration_ms)
+            if error_code:
+                pending.span.set_attribute("agentops.error_code", str(error_code))
+                pending.span.set_status(Status(StatusCode.ERROR, str(error_code)))
+            else:
+                pending.span.set_status(Status(StatusCode.OK))
+            pending.span.end()
+            _safe_detach_context(pending.context_token)
+
         return None
 
     async def on_tool_error_callback(
@@ -237,10 +263,6 @@ class ChemObservabilityPlugin(BasePlugin):
             if pending
             else 0.0
         )
-        if pending is not None:
-            pending.span.record_exception(error)
-            pending.span.set_status(Status(StatusCode.ERROR, str(error)))
-            pending.span.end()
 
         outcome_event = {
             "event_phase": "OUTCOME",
@@ -253,6 +275,13 @@ class ChemObservabilityPlugin(BasePlugin):
         }
         self._audit_records.append(outcome_event)
         logger.error("agent.tool.outcome.exception", **outcome_event)
+
+        if pending is not None:
+            pending.span.record_exception(error)
+            pending.span.set_status(Status(StatusCode.ERROR, str(error)))
+            pending.span.end()
+            _safe_detach_context(pending.context_token)
+
         return None
 
     async def after_run_callback(self, *, invocation_context: InvocationContext) -> None:

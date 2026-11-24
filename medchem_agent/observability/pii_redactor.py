@@ -20,7 +20,7 @@ _LOCAL_REDACTION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     (
         "[REDACTED_API_KEY]",
         re.compile(
-            r"(?i)(?:AIza[0-9A-Za-z_\-]{20,}|sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{20,}|"
+            r"(?i)(?:AIza[0-9A-Za-z_\-]{20,}|AQ\.[0-9A-Za-z_\-]{20,}|sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{20,}|"
             r"Bearer\s+[A-Za-z0-9._\-]{16,})"
         ),
     ),

@@ -17,6 +17,7 @@ from pathlib import Path
 from google.adk.memory import BaseMemoryService, SqliteMemoryService, VertexAiMemoryBankService
 from google.adk.sessions import BaseSessionService, DatabaseSessionService, VertexAiSessionService
 
+from medchem_agent.config.secrets import get_secret_provider
 from medchem_agent.config.settings import AppSettings, get_settings
 from medchem_agent.observability.logging import get_logger
 
@@ -57,13 +58,19 @@ def build_session_service(settings: AppSettings | None = None) -> BaseSessionSer
             agent_engine_id=cfg.agent_engine_id,
         )
 
-    _ensure_sqlite_parent_dir(cfg.session_db_url)
+    db_url = cfg.session_db_url
+    if cfg.enable_secret_manager and cfg.gcp_project_id:
+        secret_db_url = get_secret_provider().get_secret("session-db-url", env_var="SESSION_DB_URL")
+        if secret_db_url:
+            db_url = secret_db_url
+
+    _ensure_sqlite_parent_dir(db_url)
     logger.info(
         "session_service.initialized",
         backend="DatabaseSessionService",
-        db_scheme=cfg.session_db_url.split("://", 1)[0],
+        db_scheme=db_url.split("://", 1)[0],
     )
-    return DatabaseSessionService(db_url=cfg.session_db_url)
+    return DatabaseSessionService(db_url=db_url)
 
 
 def build_memory_service(settings: AppSettings | None = None) -> BaseMemoryService:
